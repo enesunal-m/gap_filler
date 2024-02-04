@@ -41,9 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let semaphore = semaphore.clone();
 
         task::spawn(async move {
-            println!("Processing symbol: {}", symbol);
             let _permit = semaphore.acquire().await.unwrap(); // Acquire semaphore permit
-            println!("Semaphore permit acquired for symbol: {}", symbol);
+            println!("Processing symbol: {}", symbol);
 
             let result = process_symbol(&db_pool, &http_client, &symbol).await;
 
