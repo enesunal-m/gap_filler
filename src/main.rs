@@ -15,13 +15,24 @@ use types::{BinanceKline, Gap};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok(); // Load .env file if exists
+    println!("Loaded .env file successfully.");
+
     let database_url = env::var("DATABASE_URL")?;
+    println!("Connecting to database...");
     let db_pool = Pool::<Postgres>::connect(&database_url).await?;
+    println!("Connected to database successfully.");
+
     let http_client = Client::new();
+    println!("HTTP client created.");
+
     let semaphore = Arc::new(Semaphore::new(10)); // Limit concurrent tasks
+    println!("Semaphore with 10 permits created.");
 
     let symbols = fetch_distinct_symbols(&db_pool).await?;
+    println!("Fetched {} distinct symbols", symbols.len());
+
     let (tx, mut rx) = mpsc::channel(32); // Channel for handling task results
+    println!("Channel for handling task results created.");
 
     for symbol in symbols.into_iter() {
         let tx = tx.clone();
@@ -30,20 +41,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let semaphore = semaphore.clone();
 
         task::spawn(async move {
+            println!("Processing symbol: {}", symbol);
             let _permit = semaphore.acquire().await.unwrap(); // Acquire semaphore permit
+            println!("Semaphore permit acquired for symbol: {}", symbol);
+
             let result = process_symbol(&db_pool, &http_client, &symbol).await;
 
             match result {
-                Ok(_) => tx.send(Ok(symbol)).await.unwrap(),
-                Err(e) => tx
-                    .send(Err((symbol, Box::<dyn std::error::Error + Send>::from(e))))
-                    .await
-                    .unwrap(),
+                Ok(_) => {
+                    println!("Successfully processed symbol: {}", symbol);
+                    tx.send(Ok(symbol)).await.unwrap();
+                }
+                Err(e) => {
+                    eprintln!("Failed to process symbol: {}. Error: {}", symbol, e);
+                    tx.send(Err((symbol, Box::<dyn std::error::Error + Send>::from(e))))
+                        .await
+                        .unwrap();
+                }
             }
         });
     }
 
     drop(tx); // Close the channel
+    println!("Task submission complete, channel closed.");
 
     // Process results
     while let Some(result) = rx.recv().await {
@@ -53,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    println!("All tasks completed.");
     Ok(())
 }
 
@@ -76,13 +97,20 @@ async fn process_symbol(
 }
 
 async fn fetch_distinct_symbols(db_pool: &Pool<Postgres>) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_as::<_, (String,)>("SELECT DISTINCT tickersymbol FROM candle")
+    println!("Fetching distinct symbols from the database...");
+    let symbols = sqlx::query_as::<_, (String,)>("SELECT DISTINCT tickersymbol FROM candle")
         .fetch_all(db_pool)
         .await
-        .map(|rows| rows.into_iter().map(|(symbol,)| symbol).collect())
+        .map(|rows| rows.into_iter().map(|(symbol,)| symbol).collect::<Vec<_>>());
+    match &symbols {
+        Ok(symbols) => println!("Successfully fetched {} distinct symbols.", symbols.len()),
+        Err(e) => eprintln!("Error fetching distinct symbols: {}", e),
+    }
+    symbols
 }
 
 async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, sqlx::Error> {
+    println!("Finding gaps for symbol: {}", symbol);
     let mut gaps = Vec::new();
     let mut last_end: Option<DateTime<Utc>> = None;
 
@@ -101,9 +129,19 @@ async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, s
                     start_time: prev_end + chrono::Duration::minutes(1),
                     end_time: current_start - chrono::Duration::minutes(1),
                 });
+                println!(
+                    "Gap found for symbol: {} from {} to {}",
+                    symbol, prev_end, current_start
+                );
             }
         }
         last_end = Some(Utc.timestamp_millis_opt(row.closetime.timestamp()).unwrap());
+    }
+
+    if gaps.is_empty() {
+        println!("No gaps found for symbol: {}", symbol);
+    } else {
+        println!("Found {} gaps for symbol: {}", gaps.len(), symbol);
     }
 
     Ok(gaps)
@@ -114,6 +152,10 @@ async fn fetch_binance_data(
     symbol: &str,
     gap: &Gap,
 ) -> Result<Vec<BinanceKline>, reqwest::Error> {
+    println!(
+        "Fetching Binance data for symbol: {} for gap from {} to {}",
+        symbol, gap.start_time, gap.end_time
+    );
     let response = client
         .get("https://api.binance.com/api/v3/klines")
         .query(&[
@@ -129,6 +171,12 @@ async fn fetch_binance_data(
         .await?
         .json::<Vec<Vec<String>>>()
         .await?;
+
+    println!(
+        "Fetched {} klines for symbol: {} for the specified gap",
+        response.len(),
+        symbol
+    );
 
     // Convert the response to Vec<BinanceKline>
     let data: Vec<BinanceKline> = response
@@ -154,8 +202,13 @@ async fn insert_data(
     ticker_symbol: &str,
     interval: &str,
 ) -> Result<(), sqlx::Error> {
+    println!(
+        "Inserting data for symbol: {} with {} entries",
+        ticker_symbol,
+        data.len()
+    );
     for kline in data {
-        sqlx::query!(
+        let result = sqlx::query!(
             "INSERT INTO candle (opentime, closetime, open, high, low, close, volume, interval, tickersymbol) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (opentime, interval, tickersymbol) DO NOTHING",
             NaiveDateTime::from_timestamp_millis(kline.open_time),
             NaiveDateTime::from_timestamp_millis(kline.close_time),
@@ -168,8 +221,23 @@ async fn insert_data(
             ticker_symbol
         )
         .execute(db_pool)
-        .await?;
+        .await;
+
+        match result {
+            Ok(_) => println!(
+                "Successfully inserted/updated candle for symbol: {}",
+                ticker_symbol
+            ),
+            Err(e) => eprintln!(
+                "Failed to insert/update candle for symbol: {}. Error: {}",
+                ticker_symbol, e
+            ),
+        }
     }
 
+    println!(
+        "Data insertion/update complete for symbol: {}",
+        ticker_symbol
+    );
     Ok(())
 }
