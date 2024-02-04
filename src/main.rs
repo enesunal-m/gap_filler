@@ -97,16 +97,11 @@ async fn process_symbol(
 }
 
 async fn fetch_distinct_symbols(db_pool: &Pool<Postgres>) -> Result<Vec<String>, sqlx::Error> {
-    println!("Fetching distinct symbols from the database...");
-    let symbols = sqlx::query_as::<_, (String,)>("SELECT DISTINCT tickersymbol FROM candle")
+    println!("Fetching distinct symbols from database");
+    sqlx::query!("SELECT symbol FROM ticker")
         .fetch_all(db_pool)
         .await
-        .map(|rows| rows.into_iter().map(|(symbol,)| symbol).collect::<Vec<_>>());
-    match &symbols {
-        Ok(symbols) => println!("Successfully fetched {} distinct symbols.", symbols.len()),
-        Err(e) => eprintln!("Error fetching distinct symbols: {}", e),
-    }
-    symbols
+        .map(|rows| rows.into_iter().map(|row| row.symbol).collect())
 }
 
 async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, sqlx::Error> {
