@@ -1,3 +1,5 @@
+use std::{error::Error, fmt};
+
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -26,4 +28,22 @@ pub struct BinanceKline {
 pub struct Gap {
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BinanceResponse {
+    #[serde(rename = "t")]
+    pub open_time: i64,
+    #[serde(rename = "o")]
+    pub open: String,
+    #[serde(rename = "h")]
+    pub high: String,
+    #[serde(rename = "l")]
+    pub low: String,
+    #[serde(rename = "c")]
+    pub close: String,
+    #[serde(rename = "v")]
+    pub volume: String,
+    #[serde(rename = "T")]
+    pub close_time: i64,
 }

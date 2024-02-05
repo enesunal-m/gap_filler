@@ -1,9 +1,13 @@
-use chrono::naive::NaiveDateTime;
-use chrono::{DateTime, TimeZone, Utc};
+use binance::api::*;
+use binance::futures::market;
+use binance::market::*;
+use binance::util::build_request;
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use dotenv::dotenv;
 use reqwest::Client;
+
 use sqlx::types::BigDecimal;
-use sqlx::{Pool, Postgres};
+use sqlx::{Pool, Postgres, QueryBuilder};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
@@ -11,6 +15,9 @@ use tokio::task;
 
 mod types;
 use types::{BinanceKline, Gap};
+
+use crate::types::BinanceResponse;
+use chrono::DateTime;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,6 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let http_client = Client::new();
     println!("HTTP client created.");
+
+    let market: Market = Binance::new(None, None);
+    println!("Binance market API created.");
 
     let semaphore = Arc::new(Semaphore::new(10)); // Limit concurrent tasks
     println!("Semaphore with 10 permits created.");
@@ -39,12 +49,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db_pool = db_pool.clone();
         let http_client = http_client.clone();
         let semaphore = semaphore.clone();
+        let market_api = market.clone();
 
         task::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap(); // Acquire semaphore permit
             println!("Processing symbol: {}", symbol);
 
-            let result = process_symbol(&db_pool, &http_client, &symbol).await;
+            let result = process_symbol(&db_pool, &market_api, &symbol).await;
 
             match result {
                 Ok(_) => {
@@ -78,17 +89,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn process_symbol(
     db_pool: &Pool<Postgres>,
-    http_client: &Client,
+    market_api: &Market,
     symbol: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send>> {
     let gaps = find_gaps(db_pool, symbol)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
     for gap in gaps {
-        let data = fetch_binance_data(http_client, symbol, &gap)
+        let data = fetch_binance_data(market_api, symbol, &gap)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
-        insert_data(db_pool, &data, symbol, "1m")
+        insert_data(db_pool, &data, symbol, "1 minute")
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
     }
@@ -106,30 +117,39 @@ async fn fetch_distinct_symbols(db_pool: &Pool<Postgres>) -> Result<Vec<String>,
 async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, sqlx::Error> {
     println!("Finding gaps for symbol: {}", symbol);
     let mut gaps = Vec::new();
-    let mut last_end: Option<DateTime<Utc>> = None;
+    let mut last_end = 0;
 
     let rows = sqlx::query!(
-        "SELECT opentime, closetime FROM candle WHERE tickersymbol = $1 ORDER BY opentime ASC",
-        symbol
+        "SELECT opentime, closetime FROM candle WHERE (tickersymbol = $1 and interval = $2::interval) ORDER BY opentime ASC",
+        symbol, &"1 minute" as &str
     )
     .fetch_all(db_pool)
     .await?;
 
+    let one_minute = 60;
+
     for row in rows {
-        let current_start = Utc.timestamp_millis_opt(row.opentime.timestamp()).unwrap();
-        if let Some(prev_end) = last_end {
-            if current_start > prev_end + chrono::Duration::minutes(1) {
-                gaps.push(Gap {
-                    start_time: prev_end + chrono::Duration::minutes(1),
-                    end_time: current_start - chrono::Duration::minutes(1),
-                });
-                println!(
-                    "Gap found for symbol: {} from {} to {}",
-                    symbol, prev_end, current_start
-                );
-            }
+        let current_start = row.opentime.timestamp();
+        if (last_end == 0) && (current_start > 0) {
+            last_end = current_start;
+            continue;
         }
-        last_end = Some(Utc.timestamp_millis_opt(row.closetime.timestamp()).unwrap());
+        let prev_end = last_end;
+        if current_start > prev_end + one_minute + 1 {
+            gaps.push(Gap {
+                start_time: Utc.timestamp_millis_opt((prev_end - 1) * 1000).unwrap(),
+                end_time: Utc
+                    .timestamp_millis_opt((current_start - 1) * 1000)
+                    .unwrap(),
+            });
+            println!(
+                "Gap found for symbol: {} from {} to {}",
+                symbol,
+                NaiveDateTime::from_timestamp_millis(prev_end * 1000).unwrap(),
+                NaiveDateTime::from_timestamp_millis(current_start * 1000).unwrap(),
+            );
+        }
+        last_end = row.closetime.timestamp();
     }
 
     if gaps.is_empty() {
@@ -141,96 +161,129 @@ async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, s
     Ok(gaps)
 }
 
+enum FetchError {
+    ReqwestError(reqwest::Error),
+    BinanceError(binance::errors::Error),
+}
+
 async fn fetch_binance_data(
-    client: &Client,
+    market: &Market,
     symbol: &str,
     gap: &Gap,
 ) -> Result<Vec<BinanceKline>, reqwest::Error> {
     println!(
-        "Fetching Binance data for symbol: {} for gap from {} to {}",
+        "Fetching data for symbol: {} from {} to {}",
         symbol, gap.start_time, gap.end_time
     );
-    let response = client
-        .get("https://api.binance.com/api/v3/klines")
-        .query(&[
-            ("symbol", symbol),
-            ("interval", "1m"),
-            (
-                "startTime",
-                &(gap.start_time.timestamp_millis().to_string()),
-            ),
-            ("endTime", &(gap.end_time.timestamp_millis().to_string())),
-        ])
-        .send()
-        .await?
-        .json::<Vec<Vec<String>>>()
-        .await?;
 
-    println!(
-        "Fetched {} klines for symbol: {} for the specified gap",
-        response.len(),
-        symbol
-    );
+    let data = match market
+        .get_klines(
+            "BTCUSDT",
+            "1m",
+            10000,
+            Some((gap.start_time.timestamp() as u64) * 1000),
+            Some((gap.end_time.timestamp() as u64) * 1000),
+        )
+        .await
+        .map_err(|e| println!("Error: {}", e))
+        .unwrap()
+    {
+        binance::rest_model::KlineSummaries::AllKlineSummaries(data) => data,
+    };
 
-    // Convert the response to Vec<BinanceKline>
-    let data: Vec<BinanceKline> = response
+    // Convert BinanceResponse into BinanceKline
+    let klines: Vec<BinanceKline> = data
         .into_iter()
         .map(|kline| BinanceKline {
-            open_time: kline[0].parse().unwrap(),
-            open: kline[1].clone(),
-            high: kline[2].clone(),
-            low: kline[3].clone(),
-            close: kline[4].clone(),
-            volume: kline[5].clone(),
-            close_time: kline[6].parse().unwrap(),
-            interval: "1m".to_string(),
+            open_time: kline.open_time,
+            open: kline.open.to_string(),
+            high: kline.high.to_string(),
+            low: kline.low.to_string(),
+            close: kline.close.to_string(),
+            volume: kline.volume.to_string(),
+            close_time: kline.close_time,
+            interval: "1 minute".to_string(),
         })
         .collect();
 
-    Ok(data)
+    Ok(klines)
 }
 
 async fn insert_data(
-    db_pool: &Pool<Postgres>,
+    pool: &Pool<Postgres>,
     data: &[BinanceKline],
     ticker_symbol: &str,
     interval: &str,
 ) -> Result<(), sqlx::Error> {
-    println!(
-        "Inserting data for symbol: {} with {} entries",
-        ticker_symbol,
-        data.len()
-    );
-    for kline in data {
-        let result = sqlx::query!(
-            "INSERT INTO candle (opentime, closetime, open, high, low, close, volume, interval, tickersymbol) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (opentime, interval, tickersymbol) DO NOTHING",
-            NaiveDateTime::from_timestamp_millis(kline.open_time),
-            NaiveDateTime::from_timestamp_millis(kline.close_time),
-            kline.open.parse::<BigDecimal>().unwrap(),
-            kline.high.parse::<BigDecimal>().unwrap(),
-            kline.low.parse::<BigDecimal>().unwrap(),
-            kline.close.parse::<BigDecimal>().unwrap(),
-            kline.volume.parse::<BigDecimal>().unwrap(),
-            &interval as &str,
-            ticker_symbol
-        )
-        .execute(db_pool)
-        .await;
-
-        match result {
-            Ok(_) => println!(
-                "Successfully inserted/updated candle for symbol: {}",
-                ticker_symbol
-            ),
-            Err(e) => eprintln!(
-                "Failed to insert/update candle for symbol: {}. Error: {}",
-                ticker_symbol, e
-            ),
-        }
+    if data.is_empty() {
+        println!("No data to insert.");
+        return Ok(());
     }
 
+    // Organize your BinanceKline data into separate vectors for each column
+    let open_times: Vec<NaiveDateTime> = data
+        .iter()
+        .map(|k| NaiveDateTime::from_timestamp_millis(k.open_time).unwrap())
+        .collect();
+    let open_times_utc: Vec<DateTime<Utc>> = open_times
+        .iter()
+        .map(|ndt| DateTime::<Utc>::from_utc(*ndt, Utc))
+        .collect();
+    let close_times: Vec<NaiveDateTime> = data
+        .iter()
+        .map(|k| NaiveDateTime::from_timestamp_millis(k.close_time).unwrap())
+        .collect();
+    let close_times_utc: Vec<DateTime<Utc>> = close_times
+        .iter()
+        .map(|ndt| DateTime::<Utc>::from_utc(*ndt, Utc))
+        .collect();
+    let opens: Vec<BigDecimal> = data
+        .iter()
+        .map(|k| k.open.parse::<BigDecimal>().unwrap())
+        .collect();
+    let highs: Vec<BigDecimal> = data
+        .iter()
+        .map(|k| k.high.parse::<BigDecimal>().unwrap())
+        .collect();
+    let lows: Vec<BigDecimal> = data
+        .iter()
+        .map(|k| k.low.parse::<BigDecimal>().unwrap())
+        .collect();
+    let closes: Vec<BigDecimal> = data
+        .iter()
+        .map(|k| k.close.parse::<BigDecimal>().unwrap())
+        .collect();
+    let volumes: Vec<BigDecimal> = data
+        .iter()
+        .map(|k| k.volume.parse::<BigDecimal>().unwrap())
+        .collect();
+    let intervals: Vec<String> = vec![interval.to_string(); data.len()]; // Assuming the interval is the same for all records
+    let symbols: Vec<String> = vec![ticker_symbol.to_string(); data.len()];
+
+    // Use UNNEST to perform the bulk insert
+    sqlx::query!(
+    "
+        INSERT INTO candle (opentime, closetime, open, high, low, close, volume, interval, tickersymbol)
+        SELECT opentime, closetime, open, high, low, close, volume, interval_text::interval, tickersymbol
+        FROM UNNEST(
+            $1::timestamptz[], $2::timestamptz[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[], $7::numeric[], $8::text[], $9::text[]
+        ) AS t(opentime, closetime, open, high, low, close, volume, interval_text, tickersymbol)
+    ",
+        &open_times_utc,
+        &close_times_utc,
+        &opens,
+        &highs,
+        &lows,
+        &closes,
+        &volumes,
+        &intervals, // This should be a Vec<String> where each string is a valid interval representation
+        &symbols
+    )
+    .execute(pool)
+    .await?;
+
     println!(
-        "Data insertion/update complete for symbol: {}",
+        "Successfully inserted/updated data for symbol: {}",
         ticker_symbol
     );
     Ok(())
