@@ -267,7 +267,7 @@ async fn insert_data(
         SELECT opentime, closetime, open, high, low, close, volume, interval_text::interval, tickersymbol
         FROM UNNEST(
             $1::timestamptz[], $2::timestamptz[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[], $7::numeric[], $8::text[], $9::text[]
-        ) AS t(opentime, closetime, open, high, low, close, volume, interval_text, tickersymbol)
+        ) AS t(opentime, closetime, open, high, low, close, volume, interval_text, tickersymbol) ON CONFLICT (opentime, interval, tickersymbol) DO NOTHING
     ",
         &open_times_utc,
         &close_times_utc,
