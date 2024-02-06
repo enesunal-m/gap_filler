@@ -1,20 +1,16 @@
 use binance::api::*;
-use binance::futures::market;
 use binance::market::*;
-use binance::util::build_request;
 use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 use dotenv::dotenv;
 use reqwest::Client;
 
-use log::{debug, error, info, warn, LevelFilter};
-use log4rs::append::console::ConsoleAppender;
+use log::{error, info, LevelFilter};
 use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
-use log4rs::filter::threshold::ThresholdFilter;
 
 use sqlx::types::BigDecimal;
-use sqlx::{Pool, Postgres, QueryBuilder};
+use sqlx::{Pool, Postgres};
 use std::path::Path;
 use std::sync::Arc;
 use std::{env, fs};
