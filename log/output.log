@@ -1,0 +1,19 @@
+2024-02-06 03:21:39 [gap_filler] INFO - Loaded .env file successfully.
+2024-02-06 03:21:39 [gap_filler] INFO - Connecting to database...
+2024-02-06 03:21:39 [gap_filler] INFO - Connected to database successfully.
+2024-02-06 03:21:39 [gap_filler] INFO - HTTP client created.
+2024-02-06 03:21:39 [gap_filler] INFO - Binance market API created.
+2024-02-06 03:21:39 [gap_filler] INFO - Semaphore with 10 permits created.
+2024-02-06 03:21:39 [gap_filler] INFO - Fetching distinct symbols from database
+2024-02-06 03:21:40 [gap_filler] INFO - Fetched 1 distinct symbols
+2024-02-06 03:21:40 [gap_filler] INFO - Channel for handling task results created.
+2024-02-06 03:21:40 [gap_filler] INFO - Task submission complete, channel closed.
+2024-02-06 03:21:40 [gap_filler] INFO - Processing symbol: BTCUSDT
+2024-02-06 03:21:40 [gap_filler] INFO - Finding gaps for symbol: BTCUSDT
+2024-02-06 03:21:40 [gap_filler] INFO - Gap found for symbol: BTCUSDT from 2023-11-03 21:13:59 to 2024-02-05 14:54:00
+2024-02-06 03:21:40 [gap_filler] INFO - Found 1 gaps for symbol: BTCUSDT
+2024-02-06 03:21:40 [gap_filler] INFO - Fetching data for symbol: BTCUSDT from 2023-11-03 21:13:58 UTC to 2024-02-05 14:53:59 UTC
+2024-02-06 03:21:41 [gap_filler] INFO - Successfully inserted/updated data for symbol: BTCUSDT
+2024-02-06 03:21:41 [gap_filler] INFO - Successfully processed symbol: BTCUSDT
+2024-02-06 03:21:41 [gap_filler] INFO - Completed processing for symbol: BTCUSDT
+2024-02-06 03:21:41 [gap_filler] INFO - All tasks completed.

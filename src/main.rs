@@ -2,14 +2,22 @@ use binance::api::*;
 use binance::futures::market;
 use binance::market::*;
 use binance::util::build_request;
-use chrono::{NaiveDateTime, TimeZone, Utc};
+use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 use dotenv::dotenv;
 use reqwest::Client;
 
+use log::{debug, error, info, warn, LevelFilter};
+use log4rs::append::console::ConsoleAppender;
+use log4rs::append::file::FileAppender;
+use log4rs::config::{Appender, Config, Root};
+use log4rs::encode::pattern::PatternEncoder;
+use log4rs::filter::threshold::ThresholdFilter;
+
 use sqlx::types::BigDecimal;
 use sqlx::{Pool, Postgres, QueryBuilder};
-use std::env;
+use std::path::Path;
 use std::sync::Arc;
+use std::{env, fs};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task;
 
@@ -21,28 +29,30 @@ use chrono::DateTime;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    setup_logging().expect("Failed to initialize logging.");
+
     dotenv().ok(); // Load .env file if exists
-    println!("Loaded .env file successfully.");
+    info!("Loaded .env file successfully.");
 
     let database_url = env::var("DATABASE_URL")?;
-    println!("Connecting to database...");
+    info!("Connecting to database...");
     let db_pool = Pool::<Postgres>::connect(&database_url).await?;
-    println!("Connected to database successfully.");
+    info!("Connected to database successfully.");
 
     let http_client = Client::new();
-    println!("HTTP client created.");
+    info!("HTTP client created.");
 
     let market: Market = Binance::new(None, None);
-    println!("Binance market API created.");
+    info!("Binance market API created.");
 
     let semaphore = Arc::new(Semaphore::new(10)); // Limit concurrent tasks
-    println!("Semaphore with 10 permits created.");
+    info!("Semaphore with 10 permits created.");
 
     let symbols = fetch_distinct_symbols(&db_pool).await?;
-    println!("Fetched {} distinct symbols", symbols.len());
+    info!("Fetched {} distinct symbols", symbols.len());
 
     let (tx, mut rx) = mpsc::channel(32); // Channel for handling task results
-    println!("Channel for handling task results created.");
+    info!("Channel for handling task results created.");
 
     for symbol in symbols.into_iter() {
         let tx = tx.clone();
@@ -53,17 +63,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         task::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap(); // Acquire semaphore permit
-            println!("Processing symbol: {}", symbol);
+            info!("Processing symbol: {}", symbol);
 
             let result = process_symbol(&db_pool, &market_api, &symbol).await;
 
             match result {
                 Ok(_) => {
-                    println!("Successfully processed symbol: {}", symbol);
+                    info!("Successfully processed symbol: {}", symbol);
                     tx.send(Ok(symbol)).await.unwrap();
                 }
                 Err(e) => {
-                    eprintln!("Failed to process symbol: {}. Error: {}", symbol, e);
+                    error!("Failed to process symbol: {}. Error: {}", symbol, e);
                     tx.send(Err((symbol, Box::<dyn std::error::Error + Send>::from(e))))
                         .await
                         .unwrap();
@@ -73,17 +83,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     drop(tx); // Close the channel
-    println!("Task submission complete, channel closed.");
+    info!("Task submission complete, channel closed.");
 
     // Process results
     while let Some(result) = rx.recv().await {
         match result {
-            Ok(symbol) => println!("Completed processing for symbol: {}", symbol),
-            Err((symbol, e)) => eprintln!("Failed to process symbol: {}. Error: {}", symbol, e),
+            Ok(symbol) => info!("Completed processing for symbol: {}", symbol),
+            Err((symbol, e)) => error!("Failed to process symbol: {}. Error: {}", symbol, e),
         }
     }
 
-    println!("All tasks completed.");
+    info!("All tasks completed.");
+    Ok(())
+}
+
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
+    let pattern = "{d(%Y-%m-%d %H:%M:%S)} [{t}] {l} - {m}\n";
+
+    ensure_log_directory_exists("log")?;
+
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new(pattern)))
+        .build("log/output.log")?;
+
+    let config = Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(Root::builder().appender("logfile").build(LevelFilter::Info))?;
+
+    log4rs::init_config(config)?;
+
+    Ok(())
+}
+
+fn ensure_log_directory_exists(log_directory: &str) -> Result<(), std::io::Error> {
+    let path = Path::new(log_directory);
+    if !path.exists() {
+        // Create the directory and any necessary parent directories.
+        fs::create_dir_all(path)?;
+    }
     Ok(())
 }
 
@@ -107,7 +144,7 @@ async fn process_symbol(
 }
 
 async fn fetch_distinct_symbols(db_pool: &Pool<Postgres>) -> Result<Vec<String>, sqlx::Error> {
-    println!("Fetching distinct symbols from database");
+    info!("Fetching distinct symbols from database");
     sqlx::query!("SELECT symbol FROM ticker")
         .fetch_all(db_pool)
         .await
@@ -115,7 +152,7 @@ async fn fetch_distinct_symbols(db_pool: &Pool<Postgres>) -> Result<Vec<String>,
 }
 
 async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, sqlx::Error> {
-    println!("Finding gaps for symbol: {}", symbol);
+    info!("Finding gaps for symbol: {}", symbol);
     let mut gaps = Vec::new();
     let mut last_end = 0;
 
@@ -142,7 +179,7 @@ async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, s
                     .timestamp_millis_opt((current_start - 1) * 1000)
                     .unwrap(),
             });
-            println!(
+            info!(
                 "Gap found for symbol: {} from {} to {}",
                 symbol,
                 NaiveDateTime::from_timestamp_millis(prev_end * 1000).unwrap(),
@@ -153,9 +190,9 @@ async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, s
     }
 
     if gaps.is_empty() {
-        println!("No gaps found for symbol: {}", symbol);
+        info!("No gaps found for symbol: {}", symbol);
     } else {
-        println!("Found {} gaps for symbol: {}", gaps.len(), symbol);
+        info!("Found {} gaps for symbol: {}", gaps.len(), symbol);
     }
 
     Ok(gaps)
@@ -171,21 +208,21 @@ async fn fetch_binance_data(
     symbol: &str,
     gap: &Gap,
 ) -> Result<Vec<BinanceKline>, reqwest::Error> {
-    println!(
+    info!(
         "Fetching data for symbol: {} from {} to {}",
         symbol, gap.start_time, gap.end_time
     );
 
     let data = match market
         .get_klines(
-            "BTCUSDT",
+            symbol,
             "1m",
-            10000,
+            None,
             Some((gap.start_time.timestamp() as u64) * 1000),
             Some((gap.end_time.timestamp() as u64) * 1000),
         )
         .await
-        .map_err(|e| println!("Error: {}", e))
+        .map_err(|e| info!("Error: {}", e))
         .unwrap()
     {
         binance::rest_model::KlineSummaries::AllKlineSummaries(data) => data,
@@ -216,7 +253,7 @@ async fn insert_data(
     interval: &str,
 ) -> Result<(), sqlx::Error> {
     if data.is_empty() {
-        println!("No data to insert.");
+        info!("No data to insert.");
         return Ok(());
     }
 
@@ -282,7 +319,7 @@ async fn insert_data(
     .execute(pool)
     .await?;
 
-    println!(
+    info!(
         "Successfully inserted/updated data for symbol: {}",
         ticker_symbol
     );
