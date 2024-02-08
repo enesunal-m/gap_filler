@@ -34,7 +34,7 @@ impl RateLimiter {
         // Decrement remaining requests atomically
         let remaining = self.remaining.fetch_sub(1, Ordering::SeqCst);
 
-        println!("Remaining requests: {}", remaining);
+        info!("Remaining requests: {}", remaining);
 
         if remaining == 0 {
             let mut start = self.period_start.lock().unwrap();
