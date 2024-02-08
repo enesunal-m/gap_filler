@@ -47,3 +47,14 @@ pub struct BinanceResponse {
     #[serde(rename = "T")]
     pub close_time: i64,
 }
+
+#[derive(Deserialize)]
+pub struct ExchangeInfo {
+    pub symbols: Vec<Symbol>,
+}
+
+#[derive(Deserialize)]
+pub struct Symbol {
+    pub symbol: String,
+    pub status: String,
+}

@@ -11,11 +11,13 @@ use log4rs::encode::pattern::PatternEncoder;
 
 use sqlx::types::BigDecimal;
 use sqlx::{Pool, Postgres};
+use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 use std::{env, fs};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task;
+use types::ExchangeInfo;
 
 mod types;
 use types::{BinanceKline, Gap};
@@ -44,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let semaphore = Arc::new(Semaphore::new(10)); // Limit concurrent tasks
     info!("Semaphore with 10 permits created.");
 
-    let symbols = fetch_distinct_symbols(&db_pool).await?;
+    let symbols = fetch_usdt_based_symbols(&http_client).await?;
     info!("Fetched {} distinct symbols", symbols.len());
 
     let (tx, mut rx) = mpsc::channel(32); // Channel for handling task results
@@ -139,12 +141,18 @@ async fn process_symbol(
     Ok(())
 }
 
-async fn fetch_distinct_symbols(db_pool: &Pool<Postgres>) -> Result<Vec<String>, sqlx::Error> {
-    info!("Fetching distinct symbols from database");
-    sqlx::query!("SELECT symbol FROM ticker")
-        .fetch_all(db_pool)
-        .await
-        .map(|rows| rows.into_iter().map(|row| row.symbol).collect())
+async fn fetch_usdt_based_symbols(client: &Client) -> Result<Vec<String>, Box<dyn Error>> {
+    let url = "https://api.binance.com/api/v3/exchangeInfo";
+    let response = client.get(url).send().await?.json::<ExchangeInfo>().await?;
+
+    let symbols = response
+        .symbols
+        .into_iter()
+        .filter(|s| s.symbol.ends_with("USDT") && s.status == "TRADING")
+        .map(|s| s.symbol)
+        .collect();
+
+    Ok(symbols)
 }
 
 async fn find_gaps(db_pool: &Pool<Postgres>, symbol: &str) -> Result<Vec<Gap>, sqlx::Error> {
